@@ -67,10 +67,12 @@ class BridgeGame:
         self.current_trick = []
         self.scores = {player.id: 0 for player in players}
         self.game_phase = "bidding"  # bidding, playing, finished
-        self.bids = []
+        self.bids = []  # 所有叫牌記錄
         self.contract = None  # (level, suit, declarer)
         self.declarer = None
         self.lead_suit = None  # 本輪領出的花色
+        self.bidding_player = 0  # 當前叫牌的玩家
+        self.pass_count = 0  # 連續pass的次數
         
         # 四人橋牌特有屬性
         if self.player_count == 4:
@@ -125,6 +127,108 @@ class BridgeGame:
                 -Card.SUIT_ORDER[card.suit], 
                 -Card.VALUE_ORDER[card.value]
             ))
+    
+    def parse_bid(self, bid_str: str) -> Optional[Tuple[int, str]]:
+        """解析叫牌輸入"""
+        bid_str = bid_str.strip().upper()
+        
+        # Pass
+        if bid_str in ['PASS', 'P', '過牌', '不叫']:
+            return None
+        
+        # Double/Redouble (簡化版暫不實作)
+        if bid_str in ['DOUBLE', 'DBL', 'X', 'REDOUBLE', 'RDBL', 'XX']:
+            return None
+        
+        # 正常叫牌 (如 "1♠️", "2NT", "3C" 等)
+        if len(bid_str) >= 2:
+            try:
+                level = int(bid_str[0])
+                if level < 1 or level > 7:
+                    return None
+                
+                suit_str = bid_str[1:].strip()
+                
+                # 花色對照
+                suit_mapping = {
+                    '♣': '♣️', 'C': '♣️', 'CLUBS': '♣️', '梅花': '♣️',
+                    '♦': '♦️', 'D': '♦️', 'DIAMONDS': '♦️', '方塊': '♦️', 
+                    '♥': '♥️', 'H': '♥️', 'HEARTS': '♥️', '紅心': '♥️',
+                    '♠': '♠️', 'S': '♠️', 'SPADES': '♠️', '黑桃': '♠️',
+                    'NT': 'NT', 'N': 'NT', 'NOTRUMP': 'NT', '無王': 'NT'
+                }
+                
+                for key, value in suit_mapping.items():
+                    if suit_str.startswith(key):
+                        return (level, value)
+                        
+            except ValueError:
+                pass
+                
+        return None
+    
+    def is_valid_bid(self, level: int, suit: str) -> bool:
+        """檢查叫牌是否有效（必須比上一個叫牌更高）"""
+        if not self.bids:
+            return True
+            
+        # 找到最後一個非pass的叫牌
+        last_valid_bid = None
+        for bid in reversed(self.bids):
+            if bid[1] is not None:  # 不是pass
+                last_valid_bid = bid[1]
+                break
+        
+        if last_valid_bid is None:
+            return True
+        
+        last_level, last_suit = last_valid_bid
+        
+        # 花色等級：♣️ < ♦️ < ♥️ < ♠️ < NT
+        suit_order = {'♣️': 1, '♦️': 2, '♥️': 3, '♠️': 4, 'NT': 5}
+        
+        if level > last_level:
+            return True
+        elif level == last_level:
+            return suit_order.get(suit, 0) > suit_order.get(last_suit, 0)
+        else:
+            return False
+    
+    def make_bid(self, player_id: int, bid_str: str) -> Tuple[bool, str]:
+        """玩家叫牌"""
+        parsed_bid = self.parse_bid(bid_str)
+        
+        if bid_str.strip().upper() in ['PASS', 'P', '過牌', '不叫']:
+            # Pass
+            player = next(p for p in self.players if p.id == player_id)
+            self.bids.append((player, None))
+            self.pass_count += 1
+            return True, "Pass"
+        else:
+            if parsed_bid is None:
+                return False, "無效的叫牌格式！請使用如：1♠️, 2NT, 3♥️ 或 pass"
+            
+            level, suit = parsed_bid
+            if not self.is_valid_bid(level, suit):
+                return False, "叫牌必須比之前的叫牌更高！"
+            
+            player = next(p for p in self.players if p.id == player_id)
+            self.bids.append((player, (level, suit)))
+            self.pass_count = 0
+            return True, f"{level}{suit}"
+    
+    def check_bidding_end(self) -> bool:
+        """檢查叫牌是否結束"""
+        if len(self.bids) < self.player_count:
+            return False
+        
+        # 如果連續3個（雙人）或4個（四人）pass，或者連續3個pass且有人叫牌
+        if self.player_count == 2:
+            # 雙人橋牌：兩人都pass一輪後結束
+            return self.pass_count >= 2
+        else:
+            # 四人橋牌：連續3個pass結束叫牌
+            return self.pass_count >= 3
     
     def get_hand_string(self, player_id: int) -> str:
         """獲取玩家手牌的字符串表示"""
@@ -306,8 +410,8 @@ async def slash_bridge(interaction: discord.Interaction, 玩家1: discord.Member
         return
     
     # 檢查是否有機器人玩家
-    if any(player.bot for player in players):
-        await interaction.response.send_message("不能與機器人遊戲！", ephemeral=True)
+    if any(player.bot for player in players) and not TEST_MODE:
+        await interaction.response.send_message("不能與機器人遊戲！\n💡 提示：使用 `/testmode enabled:True` 啟用測試模式", ephemeral=True)
         return
     
     # 檢查是否有重複玩家
@@ -348,7 +452,7 @@ async def slash_bridge(interaction: discord.Interaction, 玩家1: discord.Member
     )
     embed.add_field(
         name="遊戲說明",
-        value="• 使用 `/hand` 查看手牌（僅自己可見）\n• 使用 `/gameinfo` 查看遊戲狀態\n• 出牌格式：直接輸入牌面，如 `♠️A` 或 `♥️K`\n• 必須跟出相同花色（如果有的話）",
+        value="• 遊戲將先進行叫牌階段\n• 使用 `/hand` 查看手牌（僅自己可見）\n• 叫牌格式：`1♠️`, `2NT`, `3♥️` 或 `pass`\n• 出牌格式：直接輸入牌面，如 `♠️A` 或 `♥️K`\n• 必須跟出相同花色（如果有的話）",
         inline=False
     )
     
@@ -357,9 +461,9 @@ async def slash_bridge(interaction: discord.Interaction, 玩家1: discord.Member
     # 通知玩家使用slash command查看手牌
     await interaction.followup.send("💡 **提示：使用 `/hand` 指令查看您的手牌（只有您能看到）**", ephemeral=True)
     
-    # 宣布第一位玩家
-    current_player = game.players[game.current_player]
-    await interaction.followup.send(f"輪到 {current_player.mention} 出牌！")
+    # 開始叫牌階段
+    current_bidder = game.players[game.bidding_player]
+    await interaction.followup.send(f"🎯 **叫牌階段開始！**\n輪到 {current_bidder.mention} 叫牌\n\n叫牌格式：`1♠️`, `2NT`, `3♥️`, `pass`")
 
 @bot.tree.command(name='hand', description='查看您的手牌（僅您可見）')
 async def slash_hand(interaction: discord.Interaction):
@@ -378,7 +482,7 @@ async def slash_hand(interaction: discord.Interaction):
     embed = discord.Embed(title="您的手牌", description=hand_str, color=0x0099ff)
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
-@bot.command(name='sync')
+# @bot.command(name='sync')
 @commands.has_permissions(administrator=True)
 async def sync_commands(ctx):
     """同步slash commands（僅管理員）"""
@@ -394,6 +498,25 @@ async def sync_commands(ctx):
 async def sync_error(ctx, error):
     if isinstance(error, commands.MissingPermissions):
         await ctx.send("❌ 只有管理員可以使用此指令")
+
+# 測試模式：允許與機器人遊戲
+TEST_MODE = os.getenv('TEST_MODE', 'false').lower() == 'true'
+
+@bot.tree.command(name='testmode', description='切換測試模式（允許與機器人遊戲）')
+@app_commands.describe(enabled='是否啟用測試模式')
+async def toggle_test_mode(interaction: discord.Interaction, enabled: bool = None):
+    """切換測試模式"""
+    global TEST_MODE
+    
+    if enabled is None:
+        # 顯示當前狀態
+        status = "啟用" if TEST_MODE else "停用"
+        await interaction.response.send_message(f"目前測試模式：**{status}**", ephemeral=True)
+        return
+    
+    TEST_MODE = enabled
+    status = "啟用" if TEST_MODE else "停用"
+    await interaction.response.send_message(f"測試模式已{status}！{'(可與機器人遊戲)' if TEST_MODE else ''}", ephemeral=True)
 
 # 為手機用戶提供備用的文字指令
 @bot.tree.command(name='start', description='開始橋牌遊戲（手機版友好）')
@@ -426,8 +549,8 @@ async def slash_start(interaction: discord.Interaction, 玩家們: str):
         return
     
     # 檢查是否有機器人玩家
-    if any(player.bot for player in players):
-        await interaction.response.send_message("不能與機器人遊戲！", ephemeral=True)
+    if any(player.bot for player in players) and not TEST_MODE:
+        await interaction.response.send_message("不能與機器人遊戲！\n💡 提示：使用 `/testmode enabled:True` 啟用測試模式", ephemeral=True)
         return
     
     # 檢查是否有重複玩家
@@ -486,7 +609,7 @@ async def slash_start(interaction: discord.Interaction, 玩家們: str):
 
 @bot.event
 async def on_message(message):
-    """處理玩家出牌"""
+    """處理玩家叫牌和出牌"""
     if message.author.bot:
         return
     
@@ -495,78 +618,201 @@ async def on_message(message):
     
     # 檢查是否是遊戲頻道
     game = games.get(message.channel.id)
-    if not game or game.game_phase != "playing":
+    if not game:
         return
     
     # 檢查是否是遊戲中的玩家
-    if message.author.id not in game.hands:
+    if message.author.id not in [p.id for p in game.players]:
         return
     
-    # 檢查是否輪到這位玩家
-    current_player = game.players[game.current_player]
-    if message.author.id != current_player.id:
-        temp_msg = await message.channel.send(f"{message.author.mention} 還沒輪到您出牌！", delete_after=3)
-        return
-    
-    # 嘗試解析出牌
-    card = game.parse_card_input(message.content)
-    if not card:
-        return  # 不是有效的出牌格式，忽略
-    
-    # 刪除玩家的出牌訊息以保持隱私
-    try:
-        await message.delete()
-    except:
-        pass
-    
-    # 嘗試出牌
-    if not game.play_card(message.author.id, card):
-        can_play, reason = game.can_play_card(message.author.id, card)
-        await message.channel.send(f"{message.author.mention} {reason}", delete_after=5)
-        return
-    
-    # 宣布出牌
-    embed = discord.Embed(
-        title="出牌",
-        description=f"{message.author.mention} 出了 {card}",
-        color=0xffd700
-    )
-    
-    # 顯示當前trick狀態
-    trick_display = " → ".join([str(card) for _, card in game.current_trick])
-    embed.add_field(name="當前Trick", value=trick_display, inline=False)
-    
-    if len(game.current_trick) < game.player_count:
-        # 還沒滿一輪，切換到下一位玩家
-        game.current_player = (game.current_player + 1) % game.player_count
-        next_player = game.players[game.current_player]
-        embed.add_field(name="下一位", value=f"{next_player.mention} 的回合", inline=False)
+    # 根據遊戲階段處理
+    if game.game_phase == "bidding":
+        # 叫牌階段
+        current_bidder = game.players[game.bidding_player]
+        if message.author.id != current_bidder.id:
+            temp_msg = await message.channel.send(f"{message.author.mention} 還沒輪到您叫牌！", delete_after=3)
+            return
         
-    else:
-        # 一輪完成，評估trick勝者
-        winner = game.finish_trick()
-        embed.add_field(name="Trick勝者", value=f"{winner.mention} 獲勝！", inline=False)
+        # 刪除玩家的叫牌訊息
+        try:
+            await message.delete()
+        except:
+            pass
         
-        # 檢查遊戲是否結束
-        if game.is_game_finished():
-            await message.channel.send(embed=embed)
+        # 處理叫牌
+        success, result = game.make_bid(message.author.id, message.content)
+        if not success:
+            await message.channel.send(f"{message.author.mention} {result}", delete_after=5)
+            return
+        
+        # 宣布叫牌結果
+        embed = discord.Embed(
+            title="叫牌",
+            description=f"{message.author.mention} 叫了 **{result}**",
+            color=0x00bfff
+        )
+        
+        # 顯示叫牌歷史
+        if game.bids:
+            bid_history = []
+            for player, bid in game.bids[-4:]:  # 顯示最近4個叫牌
+                bid_str = f"{bid[0]}{bid[1]}" if bid else "Pass"
+                bid_history.append(f"{player.display_name}: {bid_str}")
+            embed.add_field(name="叫牌歷史", value="\n".join(bid_history), inline=False)
+        
+        await message.channel.send(embed=embed)
+        
+        # 檢查叫牌是否結束
+        if game.check_bidding_end():
+            game.finalize_contract()
+            game.game_phase = "playing"
             
-            # 創建最終結果嵌入
-            final_embed = discord.Embed(title="🎉 遊戲結束！", color=0xff6b6b)
+            # 宣布最終合約
+            contract_embed = discord.Embed(
+                title="🎯 叫牌結束！",
+                color=0x00ff00
+            )
             
-            if game.player_count == 2:
-                # 雙人橋牌結果
-                game_winner = game.get_winner()
-                score_text = f"**勝者：{game_winner.mention}**\n\n"
-                score_text += f"**最終得分：**\n"
-                for player in game.players:
-                    score_text += f"{player.mention}: {game.scores[player.id]} tricks\n"
+            if game.contract:
+                level, suit, declarer = game.contract
+                trump_info = f"王牌：{suit}" if suit != 'NT' else "無王"
+                contract_embed.add_field(
+                    name="最終合約",
+                    value=f"**{level}{suit}** by {declarer.mention}\n{trump_info}",
+                    inline=False
+                )
+            
+            contract_embed.add_field(
+                name="現在開始出牌！",
+                value="請按順序出牌，必須跟出相同花色（如果有的話）",
+                inline=False
+            )
+            
+            await message.channel.send(embed=contract_embed)
+            
+            # 宣布第一位出牌者
+            current_player = game.players[game.current_player]
+            await message.channel.send(f"輪到 {current_player.mention} 出牌！")
+        else:
+            # 下一位玩家叫牌
+            game.bidding_player = (game.bidding_player + 1) % game.player_count
+            next_bidder = game.players[game.bidding_player]
+            await message.channel.send(f"輪到 {next_bidder.mention} 叫牌！")
+            
+    elif game.game_phase == "playing":
+        # 出牌階段（原有邏輯）
+        # 檢查是否輪到這位玩家
+        current_player = game.players[game.current_player]
+        if message.author.id != current_player.id:
+            temp_msg = await message.channel.send(f"{message.author.mention} 還沒輪到您出牌！", delete_after=3)
+            return
+        
+        # 嘗試解析出牌
+        card = game.parse_card_input(message.content)
+        if not card:
+            return  # 不是有效的出牌格式，忽略
+        
+        # 刪除玩家的出牌訊息以保持隱私
+        try:
+            await message.delete()
+        except:
+            pass
+        
+        # 嘗試出牌
+        if not game.play_card(message.author.id, card):
+            can_play, reason = game.can_play_card(message.author.id, card)
+            await message.channel.send(f"{message.author.mention} {reason}", delete_after=5)
+            return
+        
+        # 宣布出牌
+        embed = discord.Embed(
+            title="出牌",
+            description=f"{message.author.mention} 出了 {card}",
+            color=0xffd700
+        )
+        
+        # 顯示當前合約
+        if game.contract:
+            level, suit, declarer = game.contract
+            trump_info = f"王牌：{suit}" if suit != 'NT' else "無王"
+            embed.add_field(name="當前合約", value=f"{level}{suit} ({trump_info})", inline=True)
+        
+        # 顯示當前trick狀態
+        trick_display = " → ".join([str(card) for _, card in game.current_trick])
+        embed.add_field(name="當前Trick", value=trick_display, inline=False)
+        
+        if len(game.current_trick) < game.player_count:
+            # 還沒滿一輪，切換到下一位玩家
+            game.current_player = (game.current_player + 1) % game.player_count
+            next_player = game.players[game.current_player]
+            embed.add_field(name="下一位", value=f"{next_player.mention} 的回合", inline=False)
+            
+        else:
+            # 一輪完成，評估trick勝者
+            winner = game.finish_trick()
+            embed.add_field(name="Trick勝者", value=f"{winner.mention} 獲勝！", inline=False)
+            
+            # 檢查遊戲是否結束
+            if game.is_game_finished():
+                await message.channel.send(embed=embed)
+                
+                # 創建最終結果嵌入
+                final_embed = discord.Embed(title="🎉 遊戲結束！", color=0xff6b6b)
+                
+                if game.player_count == 2:
+                    # 雙人橋牌結果
+                    game_winner = game.get_winner()
+                    score_text = f"**勝者：{game_winner.mention}**\n\n"
+                    score_text += f"**最終得分：**\n"
+                    for player in game.players:
+                        score_text += f"{player.mention}: {game.scores[player.id]} tricks\n"
+                else:
+                    # 四人橋牌結果
+                    winner_team = game.get_winner()
+                    if winner_team == "NS":
+                        score_text = f"**勝者：南北隊 🏆**\n{game.players[0].mention} & {game.players[2].mention}\n\n"
+                    elif winner_team == "EW":
+                        score_text = f"**勝者：東西隊 🏆**\n{game.players[1].mention} & {game.players[3].mention}\n\n"
+                    else:
+                        score_text = f"**平手！** 🤝\n\n"
+                    
+                    score_text += f"**隊伍得分：**\n"
+                    score_text += f"南北隊: {game.team_scores['NS']} tricks\n"
+                    score_text += f"東西隊: {game.team_scores['EW']} tricks\n\n"
+                    score_text += f"**個人得分：**\n"
+                    for player in game.players:
+                        position = game.positions[player.id]
+                        score_text += f"{player.mention} ({position}): {game.scores[player.id]} tricks\n"
+                
+                # 顯示合約完成情況
+                if game.contract:
+                    level, suit, declarer = game.contract
+                    target = level + 6  # 基本6墩 + 叫牌墩數
+                    if game.player_count == 4:
+                        # 檢查合約方是否完成
+                        if declarer.id in [game.players[0].id, game.players[2].id]:
+                            made_tricks = game.team_scores["NS"]
+                        else:
+                            made_tricks = game.team_scores["EW"]
+                    else:
+                        made_tricks = game.scores[declarer.id]
+                    
+                    contract_result = "完成" if made_tricks >= target else "失敗"
+                    score_text += f"\n**合約結果：**\n{level}{suit} - {contract_result} ({made_tricks}/{target})"
+                
+                final_embed.add_field(name="最終結果", value=score_text, inline=False)
+                await message.channel.send(embed=final_embed)
+                
+                # 清理遊戲
+                del games[message.channel.id]
+                return
             else:
-                # 四人橋牌結果
-                winner_team = game.get_winner()
-                if winner_team == "NS":
-                    score_text = f"**勝者：南北隊 🏆**\n{game.players[0].mention} & {game.players[2].mention}\n\n"
-                elif winner_team == "EW":
+                # 設置下一輪的先手（trick勝者）
+                game.current_player = game.players.index(winner)
+                next_player = game.players[game.current_player]
+                embed.add_field(name="下一輪先手", value=f"{next_player.mention} 先出牌", inline=False)
+        
+        await message.channel.send(embed=embed)\                elif winner_team == "EW":
                     score_text = f"**勝者：東西隊 🏆**\n{game.players[1].mention} & {game.players[3].mention}\n\n"
                 else:
                     score_text = f"**平手！** 🤝\n\n"
@@ -578,6 +824,22 @@ async def on_message(message):
                 for player in game.players:
                     position = game.positions[player.id]
                     score_text += f"{player.mention} ({position}): {game.scores[player.id]} tricks\n"
+            
+            # 顯示合約完成情況
+            if game.contract:
+                level, suit, declarer = game.contract
+                target = level + 6  # 基本6墩 + 叫牌墩數
+                if game.player_count == 4:
+                    # 檢查合約方是否完成
+                    if declarer.id in [game.players[0].id, game.players[2].id]:
+                        made_tricks = game.team_scores["NS"]
+                    else:
+                        made_tricks = game.team_scores["EW"]
+                else:
+                    made_tricks = game.scores[declarer.id]
+                
+                contract_result = "完成" if made_tricks >= target else "失敗"
+                score_text += f"\n**合約結果：**\n{level}{suit} - {contract_result} ({made_tricks}/{target})"
             
             final_embed.add_field(name="最終結果", value=score_text, inline=False)
             await message.channel.send(embed=final_embed)
@@ -629,8 +891,30 @@ async def slash_gameinfo(interaction: discord.Interaction):
         embed.add_field(name="個人得分", value=individual_score_str, inline=True)
     
     # 顯示當前回合
-    current_player = game.players[game.current_player]
-    embed.add_field(name="當前回合", value=current_player.mention, inline=True)
+    if game.game_phase == "bidding":
+        current_bidder = game.players[game.bidding_player]
+        embed.add_field(name="當前叫牌者", value=current_bidder.mention, inline=True)
+        
+        # 顯示叫牌歷史
+        if game.bids:
+            bid_history = []
+            for player, bid in game.bids[-4:]:  # 顯示最近4個叫牌
+                bid_str = f"{bid[0]}{bid[1]}" if bid else "Pass"
+                bid_history.append(f"{player.display_name}: {bid_str}")
+            embed.add_field(name="叫牌歷史", value="\n".join(bid_history), inline=True)
+    else:
+        current_player = game.players[game.current_player]
+        embed.add_field(name="當前回合", value=current_player.mention, inline=True)
+        
+        # 顯示當前合約
+        if game.contract:
+            level, suit, declarer = game.contract
+            trump_info = f"王牌：{suit}" if suit != 'NT' else "無王"
+            embed.add_field(name="當前合約", value=f"{level}{suit} by {declarer.display_name}\n{trump_info}", inline=True)
+    
+    # 顯示遊戲階段
+    phase_text = "叫牌階段" if game.game_phase == "bidding" else "出牌階段"
+    embed.add_field(name="遊戲階段", value=phase_text, inline=True)
     
     # 顯示當前trick
     if game.current_trick:
@@ -687,7 +971,7 @@ async def slash_help(interaction: discord.Interaction):
     
     embed.add_field(
         name="🎮 遊戲指令",
-        value="**`/bridge`** - 開始新遊戲（桌面版推薦）\n• 雙人模式：只標記 玩家1\n• 四人模式：標記 玩家1, 玩家2, 玩家3\n\n**`/start`** - 開始新遊戲（手機版友好）\n• 在「玩家們」參數中標記所有玩家\n• 例如：`/start 玩家們:@朋友1 @朋友2`\n\n**`/hand`** - 查看手牌（僅自己可見）\n\n**`/gameinfo`** - 查看遊戲狀態\n\n**`/quit`** - 退出當前遊戲",
+        value="**`/bridge`** - 開始新遊戲（桌面版推薦）\n• 雙人模式：只標記 玩家1\n• 四人模式：標記 玩家1, 玩家2, 玩家3\n\n**`/start`** - 開始新遊戲（手機版友好）\n• 在「玩家們」參數中標記所有玩家\n• 例如：`/start 玩家們:@朋友1 @朋友2`\n\n**`/hand`** - 查看手牌（僅自己可見）\n\n**`/gameinfo`** - 查看遊戲狀態\n\n**`/quit`** - 退出當前遊戲\n\n**🔧 測試指令**\n**`/testmode`** - 切換測試模式\n**`/createbots`** - 測試機器人創建指南",
         inline=False
     )
     
@@ -704,8 +988,8 @@ async def slash_help(interaction: discord.Interaction):
     )
     
     embed.add_field(
-        name="🎲 基本規則",
-        value="• 必須跟出相同花色（如果有的話）\n• 花色等級：♠️ > ♥️ > ♦️ > ♣️\n• 牌值等級：A > K > Q > J > 10 > ... > 2\n• 贏得更多tricks的玩家/隊伍獲勝",
+        name="🎲 橋牌規則",
+        value="**叫牌階段：**\n• 格式：`1♠️`, `2NT`, `3♥️`, `pass`\n• 花色等級：♣️ < ♦️ < ♥️ < ♠️ < NT\n• 叫牌必須比前一個更高\n\n**出牌階段：**\n• 必須跟出相同花色（如果有的話）\n• 王牌可以吃其他花色\n• 花色等級：♠️ > ♥️ > ♦️ > ♣️\n• 牌值等級：A > K > Q > J > 10 > ... > 2",
         inline=False
     )
     
