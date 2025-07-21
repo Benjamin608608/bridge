@@ -1,0 +1,19 @@
+{
+  "name": "discord-bridge-bot",
+  "version": "1.0.0",
+  "description": "Discord橋牌機器人 - 支援雙人和四人橋牌遊戲",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "dev": "node index.js"
+  },
+  "keywords": ["discord", "bot", "bridge", "card-game"],
+  "author": "Your Name",
+  "license": "MIT",
+  "dependencies": {
+    "discord.js": "^14.14.1"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
