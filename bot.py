@@ -700,8 +700,7 @@ async def on_message(message):
             await message.channel.send(f"輪到 {next_bidder.mention} 叫牌！")
             
     elif game.game_phase == "playing":
-        # 出牌階段（原有邏輯）
-        # 檢查是否輪到這位玩家
+        # 出牌階段
         current_player = game.players[game.current_player]
         if message.author.id != current_player.id:
             temp_msg = await message.channel.send(f"{message.author.mention} 還沒輪到您出牌！", delete_after=3)
@@ -746,7 +745,6 @@ async def on_message(message):
             game.current_player = (game.current_player + 1) % game.player_count
             next_player = game.players[game.current_player]
             embed.add_field(name="下一位", value=f"{next_player.mention} 的回合", inline=False)
-            
         else:
             # 一輪完成，評估trick勝者
             winner = game.finish_trick()
