@@ -378,14 +378,111 @@ async def slash_hand(interaction: discord.Interaction):
     embed = discord.Embed(title="您的手牌", description=hand_str, color=0x0099ff)
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
-@bot.command(name='hand')
-async def show_hand(ctx):
-    """顯示玩家手牌（舊版指令，建議使用 /hand）"""
-    await ctx.send("請使用 `/hand` 指令來查看手牌（只有您能看到）！", delete_after=5)
+@bot.command(name='sync')
+@commands.has_permissions(administrator=True)
+async def sync_commands(ctx):
+    """同步slash commands（僅管理員）"""
     try:
-        await ctx.message.delete()
-    except:
-        pass
+        synced = await bot.tree.sync()
+        await ctx.send(f"✅ 成功同步了 {len(synced)} 個slash commands")
+        print(f"同步了 {len(synced)} 個commands: {[cmd.name for cmd in synced]}")
+    except Exception as e:
+        await ctx.send(f"❌ 同步失敗: {e}")
+        print(f"同步失敗: {e}")
+
+@sync_commands.error
+async def sync_error(ctx, error):
+    if isinstance(error, commands.MissingPermissions):
+        await ctx.send("❌ 只有管理員可以使用此指令")
+
+# 為手機用戶提供備用的文字指令
+@bot.tree.command(name='start', description='開始橋牌遊戲（手機版友好）')
+@app_commands.describe(
+    玩家們='標記要一起遊戲的玩家，用空格分隔（雙人模式1個，四人模式3個）'
+)
+async def slash_start(interaction: discord.Interaction, 玩家們: str):
+    """備用的開始橋牌遊戲指令（適用於手機用戶）"""
+    # 解析玩家提及
+    import re
+    mentions = re.findall(r'<@!?(\d+)>', 玩家們)
+    
+    if not mentions:
+        await interaction.response.send_message("請在參數中標記其他玩家！\n• 雙人橋牌：標記1位玩家\n• 四人橋牌：標記3位玩家\n\n例如：`/start 玩家們:@朋友1 @朋友2 @朋友3`", ephemeral=True)
+        return
+    
+    # 獲取玩家對象
+    players = []
+    for user_id in mentions:
+        try:
+            user = await bot.fetch_user(int(user_id))
+            member = interaction.guild.get_member(user.id)
+            if member:
+                players.append(member)
+        except:
+            continue
+    
+    if len(players) not in [1, 3]:
+        await interaction.response.send_message("橋牌遊戲支援2人或4人！\n• 雙人橋牌：標記1位玩家\n• 四人橋牌：標記3位玩家", ephemeral=True)
+        return
+    
+    # 檢查是否有機器人玩家
+    if any(player.bot for player in players):
+        await interaction.response.send_message("不能與機器人遊戲！", ephemeral=True)
+        return
+    
+    # 檢查是否有重複玩家
+    all_players = [interaction.user] + players
+    if len(set(player.id for player in all_players)) != len(all_players):
+        await interaction.response.send_message("不能有重複的玩家！", ephemeral=True)
+        return
+    
+    if interaction.channel.id in games:
+        await interaction.response.send_message("這個頻道已經有遊戲在進行中！", ephemeral=True)
+        return
+    
+    # 創建新遊戲
+    game = BridgeGame(interaction.channel.id, all_players)
+    game.deal_cards()
+    games[interaction.channel.id] = game
+    
+    # 發送遊戲開始訊息
+    if game.player_count == 2:
+        title = "🃏 雙人橋牌遊戲開始！"
+        description = f"{all_players[0].mention} vs {all_players[1].mention}"
+        game_rules = "• 每人26張牌\n• 先出完牌或贏得更多tricks獲勝"
+    else:
+        title = "🃏 四人橋牌遊戲開始！"
+        partners = f"**南北搭檔：** {all_players[0].mention} & {all_players[2].mention}\n**東西搭檔：** {all_players[1].mention} & {all_players[3].mention}"
+        description = partners
+        game_rules = "• 每人13張牌\n• 搭檔合作，贏得更多tricks的隊伍獲勝"
+        
+        # 顯示座位安排
+        positions = f"\n**座位安排：**\n{all_players[0].mention} - 南 (S)\n{all_players[1].mention} - 西 (W)\n{all_players[2].mention} - 北 (N)\n{all_players[3].mention} - 東 (E)"
+        description += positions
+    
+    embed = discord.Embed(title=title, description=description, color=0x00ff00)
+    embed.add_field(
+        name="遊戲規則",
+        value=game_rules,
+        inline=False
+    )
+    embed.add_field(
+        name="遊戲說明",
+        value="• 使用 `/hand` 查看手牌（僅自己可見）\n• 使用 `/gameinfo` 查看遊戲狀態\n• 出牌格式：直接輸入牌面，如 `♠️A` 或 `♥️K`\n• 必須跟出相同花色（如果有的話）",
+        inline=False
+    )
+    
+    await interaction.response.send_message(embed=embed)
+    
+    # 通知玩家使用slash command查看手牌
+    await interaction.followup.send("💡 **提示：使用 `/hand` 指令查看您的手牌（只有您能看到）**", ephemeral=True)
+    
+    # 宣布第一位玩家
+    current_player = game.players[game.current_player]
+    await interaction.followup.send(f"輪到 {current_player.mention} 出牌！")
+    
+    # 設置遊戲階段
+    game.game_phase = "playing"
 
 @bot.event
 async def on_message(message):
@@ -590,7 +687,7 @@ async def slash_help(interaction: discord.Interaction):
     
     embed.add_field(
         name="🎮 遊戲指令",
-        value="**`/bridge`** - 開始新遊戲\n• 雙人模式：只標記 玩家1\n• 四人模式：標記 玩家1, 玩家2, 玩家3\n\n**`/hand`** - 查看手牌（僅自己可見）\n\n**`/gameinfo`** - 查看遊戲狀態\n\n**`/quit`** - 退出當前遊戲",
+        value="**`/bridge`** - 開始新遊戲（桌面版推薦）\n• 雙人模式：只標記 玩家1\n• 四人模式：標記 玩家1, 玩家2, 玩家3\n\n**`/start`** - 開始新遊戲（手機版友好）\n• 在「玩家們」參數中標記所有玩家\n• 例如：`/start 玩家們:@朋友1 @朋友2`\n\n**`/hand`** - 查看手牌（僅自己可見）\n\n**`/gameinfo`** - 查看遊戲狀態\n\n**`/quit`** - 退出當前遊戲",
         inline=False
     )
     
