@@ -652,30 +652,74 @@ client.on('messageCreate', async message => {
 
         // 宣布出牌
         const embed = new EmbedBuilder()
-            .setTitle('出牌')
-            .setDescription(`${message.author} 出了 ${card}`)
+            .setTitle('🃏 出牌')
+            .setDescription(`${message.author} 出了 **${card}**`)
             .setColor(0xffd700);
 
         // 顯示當前合約
         if (game.contract) {
             const [level, suit, declarer] = game.contract;
             const trumpInfo = suit !== 'NT' ? `王牌：${suit}` : '無王';
-            embed.addFields({ name: '當前合約', value: `${level}${suit} (${trumpInfo})`, inline: true });
+            embed.addFields({ name: '當前合約', value: `${level}${suit} by ${declarer.username}\n${trumpInfo}`, inline: true });
         }
 
         // 顯示當前trick狀態
-        const trickDisplay = game.currentTrick.map(t => `${t.card}`).join(' → ');
+        const trickDisplay = game.currentTrick.map((t, index) => {
+            const playerName = t.player.username;
+            const cardStr = `${t.card}`;
+            const isLeader = index === 0 ? ' (領牌)' : '';
+            return `${playerName}: ${cardStr}${isLeader}`;
+        }).join('\n');
+        
         embed.addFields({ name: '當前Trick', value: trickDisplay, inline: false });
+
+        // 顯示出牌規則提示
+        if (game.currentTrick.length === 1) {
+            const leadSuit = game.currentTrick[0].card.suit;
+            embed.addFields({ 
+                name: '出牌規則', 
+                value: `必須跟出 ${leadSuit} 花色（如果有的話）${game.trumpSuit ? `\n王牌 ${game.trumpSuit} 可以吃其他花色` : ''}`, 
+                inline: false 
+            });
+        }
 
         if (game.currentTrick.length < game.playerCount) {
             // 還沒滿一輪，切換到下一位玩家
             game.currentPlayer = (game.currentPlayer + 1) % game.playerCount;
             const nextPlayer = game.players[game.currentPlayer];
-            embed.addFields({ name: '下一位', value: `${nextPlayer} 的回合`, inline: false });
+            embed.addFields({ name: '⏭️ 下一位出牌', value: `輪到 ${nextPlayer} 出牌`, inline: false });
+            
+            // 顯示剩餘玩家數
+            const remaining = game.playerCount - game.currentTrick.length;
+            embed.addFields({ name: '本輪狀態', value: `還需要 ${remaining} 位玩家出牌`, inline: true });
         } else {
             // 一輪完成，評估trick勝者
             const winner = game.finishTrick();
-            embed.addFields({ name: 'Trick勝者', value: `${winner} 獲勝！`, inline: false });
+            embed.addFields({ name: '🏆 Trick勝者', value: `${winner} 獲勝！`, inline: false });
+            
+            // 顯示勝牌原因
+            const winningTrick = game.tricks[game.tricks.length - 1];
+            const winningCard = winningTrick.trick.find(t => t.player.id === winner.id).card;
+            let winReason = '';
+            
+            if (game.trumpSuit && winningCard.suit === game.trumpSuit) {
+                winReason = `(${winningCard} 是王牌)`;
+            } else if (winningCard.suit === game.leadSuit) {
+                winReason = `(${winningCard} 是最大的${game.leadSuit})`;
+            } else {
+                winReason = `(${winningCard} 獲勝)`;
+            }
+            
+            embed.addFields({ name: '勝牌原因', value: winReason, inline: true });
+
+            // 顯示當前得分
+            if (game.playerCount === 2) {
+                const scoreStr = `${game.players[0]}: ${game.scores[game.players[0].id]} tricks\n${game.players[1]}: ${game.scores[game.players[1].id]} tricks`;
+                embed.addFields({ name: '當前得分', value: scoreStr, inline: true });
+            } else {
+                const teamScoreStr = `南北隊: ${game.teamScores['NS']} tricks\n東西隊: ${game.teamScores['EW']} tricks`;
+                embed.addFields({ name: '隊伍得分', value: teamScoreStr, inline: true });
+            }
 
             // 檢查遊戲是否結束
             if (game.isGameFinished()) {
@@ -727,7 +771,7 @@ client.on('messageCreate', async message => {
                         madeTricks = game.scores[declarer.id];
                     }
                     
-                    const contractResult = madeTricks >= target ? "完成" : "失敗";
+                    const contractResult = madeTricks >= target ? "✅ 完成" : "❌ 失敗";
                     scoreText += `\n**合約結果：**\n${level}${suit} - ${contractResult} (${madeTricks}/${target})`;
                 }
 
@@ -741,7 +785,13 @@ client.on('messageCreate', async message => {
                 // 設置下一輪的先手（trick勝者）
                 game.currentPlayer = game.players.findIndex(p => p.id === winner.id);
                 const nextPlayer = game.players[game.currentPlayer];
-                embed.addFields({ name: '下一輪先手', value: `${nextPlayer} 先出牌`, inline: false });
+                embed.addFields({ name: '🎯 下一輪先手', value: `${nextPlayer} 先出牌（贏得了上一trick）`, inline: false });
+                
+                // 顯示剩餘手牌信息
+                const remainingCards = Object.values(game.hands).reduce((sum, hand) => sum + hand.length, 0);
+                const tricksPlayed = game.tricks.length;
+                const totalTricks = game.playerCount === 2 ? 26 : 13;
+                embed.addFields({ name: '遊戲進度', value: `已完成 ${tricksPlayed}/${totalTricks} tricks`, inline: true });
             }
         }
 
