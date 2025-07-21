@@ -1,4 +1,268 @@
-const { Client, GatewayIntentBits, SlashCommandBuilder, EmbedBuilder, Collection } = require('discord.js');
+// 處理訊息（叫牌和出牌）
+client.on('messageCreate', async message => {
+    if (message.author.bot) return;
+
+    const game = games.get(message.channelId);
+    if (!game) return;
+
+    if (!game.players.some(p => p.id === message.author.id)) return;
+
+    console.log(`收到訊息: "${message.content}" 來自 ${message.author.tag}, 遊戲階段: ${game.gamePhase}`);
+
+    if (game.gamePhase === "bidding") {
+        // 叫牌階段
+        const currentBidder = game.players[game.biddingPlayer];
+        if (message.author.id !== currentBidder.id) {
+            const temp = await message.channel.send(`${message.author} 還沒輪到您叫牌！`);
+            setTimeout(() => temp.delete().catch(() => {}), 3000);
+            return;
+        }
+
+        try {
+            await message.delete();
+        } catch {}
+
+        const bidResult = game.makeBid(message.author.id, message.content);
+        if (!bidResult.success) {
+            const temp = await message.channel.send(`${message.author} ${bidResult.result}`);
+            setTimeout(() => temp.delete().catch(() => {}), 5000);
+            return;
+        }
+
+        const embed = new EmbedBuilder()
+            .setTitle('叫牌')
+            .setDescription(`${message.author} 叫了 **${bidResult.result}**`)
+            .setColor(0x00bfff);
+
+        // 顯示叫牌歷史
+        if (game.bids.length > 0) {
+            const bidHistory = game.bids.slice(-4).map(bid => {
+                const bidStr = bid.bid ? `${bid.bid[0]}${bid.bid[1]}` : "Pass";
+                return `${bid.player.username}: ${bidStr}`;
+            });
+            embed.addFields({ name: '叫牌歷史', value: bidHistory.join('\n'), inline: false });
+        }
+
+        await message.channel.send({ embeds: [embed] });
+
+        if (game.checkBiddingEnd()) {
+            game.finalizeContract();
+            game.gamePhase = "playing";
+
+            const contractEmbed = new EmbedBuilder()
+                .setTitle('🎯 叫牌結束！')
+                .setColor(0x00ff00);
+
+            if (game.contract) {
+                const [level, suit, declarer] = game.contract;
+                const trumpInfo = suit !== 'NT' ? `王牌：${suit}` : '無王';
+                contractEmbed.addFields({
+                    name: '最終合約',
+                    value: `**${level}${suit}** by ${declarer.username}\n${trumpInfo}`,
+                    inline: false
+                });
+            }
+
+            contractEmbed.addFields({
+                name: '現在開始出牌！',
+                value: '請按順序出牌，必須跟出相同花色（如果有的話）',
+                inline: false
+            });
+
+            await message.channel.send({ embeds: [contractEmbed] });
+
+            const currentPlayer = game.players[game.currentPlayer];
+            await message.channel.send(`輪到 ${currentPlayer} 出牌！`);
+        } else {
+            game.biddingPlayer = (game.biddingPlayer + 1) % game.playerCount;
+            const nextBidder = game.players[game.biddingPlayer];
+            await message.channel.send(`輪到 ${nextBidder} 叫牌！`);
+        }
+    
+    } else if (game.gamePhase === "playing") {
+        // 出牌階段
+        console.log(`出牌階段 - 當前玩家: ${game.players[game.currentPlayer].tag}, 訊息作者: ${message.author.tag}`);
+        
+        const currentPlayer = game.players[game.currentPlayer];
+        if (message.author.id !== currentPlayer.id) {
+            const temp = await message.channel.send(`${message.author} 還沒輪到您出牌！`);
+            setTimeout(() => temp.delete().catch(() => {}), 3000);
+            return;
+        }
+
+        // 嘗試解析出牌
+        console.log(`嘗試解析出牌: "${message.content}"`);
+        const card = game.parseCardInput(message.content);
+        console.log(`解析結果:`, card);
+        
+        if (!card) {
+            console.log(`無法解析出牌，忽略訊息`);
+            return; // 不是有效的出牌格式，忽略
+        }
+
+        try {
+            await message.delete();
+        } catch {}
+
+        // 嘗試出牌
+        const playResult = game.playCard(message.author.id, card);
+        console.log(`出牌結果:`, playResult);
+        
+        if (!playResult.canPlay) {
+            const temp = await message.channel.send(`${message.author} ${playResult.reason}`);
+            setTimeout(() => temp.delete().catch(() => {}), 5000);
+            return;
+        }
+
+        // 宣布出牌
+        const embed = new EmbedBuilder()
+            .setTitle('🃏 出牌')
+            .setDescription(`${message.author} 出了 **${card}**`)
+            .setColor(0xffd700);
+
+        // 顯示當前合約
+        if (game.contract) {
+            const [level, suit, declarer] = game.contract;
+            const trumpInfo = suit !== 'NT' ? `王牌：${suit}` : '無王';
+            embed.addFields({ name: '當前合約', value: `${level}${suit} by ${declarer.username}\n${trumpInfo}`, inline: true });
+        }
+
+        // 顯示當前trick狀態
+        const trickDisplay = game.currentTrick.map((t, index) => {
+            const playerName = t.player.username;
+            const cardStr = `${t.card}`;
+            const isLeader = index === 0 ? ' (領牌)' : '';
+            return `${playerName}: ${cardStr}${isLeader}`;
+        }).join('\n');
+        
+        embed.addFields({ name: '當前Trick', value: trickDisplay, inline: false });
+
+        // 顯示出牌規則提示
+        if (game.currentTrick.length === 1) {
+            const leadSuit = game.currentTrick[0].card.suit;
+            embed.addFields({ 
+                name: '出牌規則', 
+                value: `必須跟出 ${leadSuit} 花色（如果有的話）${game.trumpSuit ? `\n王牌 ${game.trumpSuit} 可以吃其他花色` : ''}`, 
+                inline: false 
+            });
+        }
+
+        if (game.currentTrick.length < game.playerCount) {
+            // 還沒滿一輪，切換到下一位玩家
+            game.currentPlayer = (game.currentPlayer + 1) % game.playerCount;
+            const nextPlayer = game.players[game.currentPlayer];
+            embed.addFields({ name: '⏭️ 下一位出牌', value: `輪到 ${nextPlayer} 出牌`, inline: false });
+            
+            // 顯示剩餘玩家數
+            const remaining = game.playerCount - game.currentTrick.length;
+            embed.addFields({ name: '本輪狀態', value: `還需要 ${remaining} 位玩家出牌`, inline: true });
+        } else {
+            // 一輪完成，評估trick勝者
+            const winner = game.finishTrick();
+            embed.addFields({ name: '🏆 Trick勝者', value: `${winner} 獲勝！`, inline: false });
+            
+            // 顯示勝牌原因
+            const winningTrick = game.tricks[game.tricks.length - 1];
+            const winningCard = winningTrick.trick.find(t => t.player.id === winner.id).card;
+            let winReason = '';
+            
+            if (game.trumpSuit && winningCard.suit === game.trumpSuit) {
+                winReason = `(${winningCard} 是王牌)`;
+            } else if (winningCard.suit === game.leadSuit) {
+                winReason = `(${winningCard} 是最大的${game.leadSuit})`;
+            } else {
+                winReason = `(${winningCard} 獲勝)`;
+            }
+            
+            embed.addFields({ name: '勝牌原因', value: winReason, inline: true });
+
+            // 顯示當前得分
+            if (game.playerCount === 2) {
+                const scoreStr = `${game.players[0]}: ${game.scores[game.players[0].id]} tricks\n${game.players[1]}: ${game.scores[game.players[1].id]} tricks`;
+                embed.addFields({ name: '當前得分', value: scoreStr, inline: true });
+            } else {
+                const teamScoreStr = `南北隊: ${game.teamScores['NS']} tricks\n東西隊: ${game.teamScores['EW']} tricks`;
+                embed.addFields({ name: '隊伍得分', value: teamScoreStr, inline: true });
+            }
+
+            // 檢查遊戲是否結束
+            if (game.isGameFinished()) {
+                await message.channel.send({ embeds: [embed] });
+
+                // 創建最終結果
+                const finalEmbed = new EmbedBuilder()
+                    .setTitle('🎉 遊戲結束！')
+                    .setColor(0xff6b6b);
+
+                let scoreText = "";
+                if (game.playerCount === 2) {
+                    const gameWinner = game.getWinner();
+                    scoreText = `**勝者：${gameWinner}**\n\n**最終得分：**\n`;
+                    for (const player of game.players) {
+                        scoreText += `${player}: ${game.scores[player.id]} tricks\n`;
+                    }
+                } else {
+                    const winnerTeam = game.getWinner();
+                    if (winnerTeam === "NS") {
+                        scoreText = `**勝者：南北隊 🏆**\n${game.players[0]} & ${game.players[2]}\n\n`;
+                    } else if (winnerTeam === "EW") {
+                        scoreText = `**勝者：東西隊 🏆**\n${game.players[1]} & ${game.players[3]}\n\n`;
+                    } else {
+                        scoreText = `**平手！** 🤝\n\n`;
+                    }
+                    
+                    scoreText += `**隊伍得分：**\n南北隊: ${game.teamScores['NS']} tricks\n東西隊: ${game.teamScores['EW']} tricks\n\n`;
+                    scoreText += `**個人得分：**\n`;
+                    for (const player of game.players) {
+                        const position = game.positions[player.id];
+                        scoreText += `${player} (${position}): ${game.scores[player.id]} tricks\n`;
+                    }
+                }
+
+                // 顯示合約完成情況
+                if (game.contract) {
+                    const [level, suit, declarer] = game.contract;
+                    const target = level + 6; // 基本6墩 + 叫牌墩數
+                    let madeTricks;
+                    
+                    if (game.playerCount === 4) {
+                        if ([game.players[0].id, game.players[2].id].includes(declarer.id)) {
+                            madeTricks = game.teamScores["NS"];
+                        } else {
+                            madeTricks = game.teamScores["EW"];
+                        }
+                    } else {
+                        madeTricks = game.scores[declarer.id];
+                    }
+                    
+                    const contractResult = madeTricks >= target ? "✅ 完成" : "❌ 失敗";
+                    scoreText += `\n**合約結果：**\n${level}${suit} - ${contractResult} (${madeTricks}/${target})`;
+                }
+
+                finalEmbed.addFields({ name: '最終結果', value: scoreText, inline: false });
+                await message.channel.send({ embeds: [finalEmbed] });
+
+                // 清理遊戲
+                games.delete(message.channelId);
+                return;
+            } else {
+                // 設置下一輪的先手（trick勝者）
+                game.currentPlayer = game.players.findIndex(p => p.id === winner.id);
+                const nextPlayer = game.players[game.currentPlayer];
+                embed.addFields({ name: '🎯 下一輪先手', value: `${nextPlayer} 先出牌（贏得了上一trick）`, inline: false });
+                
+                // 顯示剩餘手牌信息
+                const remainingCards = Object.values(game.hands).reduce((sum, hand) => sum + hand.length, 0);
+                const tricksPlayed = game.tricks.length;
+                const totalTricks = game.playerCount === 2 ? 26 : 13;
+                embed.addFields({ name: '遊戲進度', value: `已完成 ${tricksPlayed}/${totalTricks} tricks`, inline: true });
+            }
+        }
+
+        await message.channel.send({ embeds: [embed] });
+    }
+});
+                const { Client, GatewayIntentBits, SlashCommandBuilder, EmbedBuilder, Collection } = require('discord.js');
 
 // 機器人設置
 const client = new Client({
@@ -285,6 +549,111 @@ class BridgeGame {
         } else {
             return this.passCount >= 3;
         }
+    }
+
+    canPlayCard(playerId, card) {
+        // 檢查玩家是否有這張牌
+        const hasCard = this.hands[playerId].some(c => c.suit === card.suit && c.value === card.value);
+        if (!hasCard) {
+            return { canPlay: false, reason: "您沒有這張牌！" };
+        }
+
+        // 如果是第一張牌，可以出任何牌
+        if (this.currentTrick.length === 0) {
+            return { canPlay: true, reason: "" };
+        }
+
+        // 需要跟牌
+        const leadSuit = this.currentTrick[0].card.suit;
+        const hasLeadSuit = this.hands[playerId].some(c => c.suit === leadSuit);
+
+        if (card.suit !== leadSuit && hasLeadSuit) {
+            return { canPlay: false, reason: `您必須跟出 ${leadSuit} 花色的牌！` };
+        }
+
+        return { canPlay: true, reason: "" };
+    }
+
+    playCard(playerId, card) {
+        const checkResult = this.canPlayCard(playerId, card);
+        if (!checkResult.canPlay) {
+            return checkResult;
+        }
+
+        // 移除手牌中的這張牌
+        const handIndex = this.hands[playerId].findIndex(c => c.suit === card.suit && c.value === card.value);
+        if (handIndex !== -1) {
+            this.hands[playerId].splice(handIndex, 1);
+        }
+
+        // 添加到當前trick
+        const player = this.players.find(p => p.id === playerId);
+        this.currentTrick.push({ player, card });
+
+        // 設置領出花色
+        if (this.currentTrick.length === 1) {
+            this.leadSuit = card.suit;
+        }
+
+        return { canPlay: true, reason: "" };
+    }
+
+    evaluateTrick() {
+        if (this.currentTrick.length !== this.playerCount) {
+            return null;
+        }
+
+        let winningPlayer = this.currentTrick[0].player;
+        let winningCard = this.currentTrick[0].card;
+
+        // 比較所有牌找出最大的
+        for (let i = 1; i < this.currentTrick.length; i++) {
+            const { player, card } = this.currentTrick[i];
+            const comparison = card.compareValue(winningCard, this.trumpSuit);
+            
+            if (comparison > 0) {
+                winningPlayer = player;
+                winningCard = card;
+            } else if (comparison === 0 && card.suit === this.leadSuit && winningCard.suit !== this.leadSuit) {
+                // 如果都不是王牌，跟牌者勝過非跟牌者
+                winningPlayer = player;
+                winningCard = card;
+            }
+        }
+
+        return winningPlayer;
+    }
+
+    finishTrick() {
+        const winner = this.evaluateTrick();
+        if (winner) {
+            this.tricks.push({ trick: [...this.currentTrick], winner });
+            
+            // 更新分數
+            if (this.playerCount === 2) {
+                this.scores[winner.id] += 1;
+            } else {
+                // 四人橋牌：更新隊伍分數
+                if ([this.players[0].id, this.players[2].id].includes(winner.id)) {
+                    this.teamScores["NS"] += 1;
+                } else {
+                    this.teamScores["EW"] += 1;
+                }
+                this.scores[winner.id] += 1;
+            }
+            
+            this.currentTrick = [];
+            this.leadSuit = null;
+            
+            // 勝者成為下一輪的先手
+            this.currentPlayer = this.players.findIndex(p => p.id === winner.id);
+        }
+        
+        return winner;
+    }
+
+    isGameFinished() {
+        return Object.values(this.hands).every(hand => hand.length === 0);
     }
 
     finalizeContract() {
