@@ -810,7 +810,7 @@ async def on_message(message):
                 next_player = game.players[game.current_player]
                 embed.add_field(name="下一輪先手", value=f"{next_player.mention} 先出牌", inline=False)
         
-        await message.channel.send(embed=embed)\                elif winner_team == "EW":
+        await message.channel.send(embed=embed)                elif winner_team == "EW":
                     score_text = f"**勝者：東西隊 🏆**\n{game.players[1].mention} & {game.players[3].mention}\n\n"
                 else:
                     score_text = f"**平手！** 🤝\n\n"
