@@ -405,12 +405,27 @@ TEST_MODE = os.getenv('TEST_MODE', 'false').lower() == 'true'
 
 @bot.event
 async def on_ready():
-    print(f'{bot.user} 橋牌機器人已上線！')
+    print(f'🎉 {bot.user} 橋牌機器人已上線！')
+    print(f'機器人ID: {bot.user.id}')
+    print(f'連接到 {len(bot.guilds)} 個伺服器')
+    
+    # 列出所有連接的伺服器
+    for guild in bot.guilds:
+        print(f'  - {guild.name} (成員數: {guild.member_count})')
+    
     try:
+        print("🔄 正在同步slash commands...")
         synced = await bot.tree.sync()
-        print(f'同步了 {len(synced)} 個slash commands')
+        print(f'✅ 成功同步了 {len(synced)} 個slash commands')
+        
+        # 列出同步的commands
+        for cmd in synced:
+            print(f'  - /{cmd.name}: {cmd.description}')
+            
     except Exception as e:
-        print(f'同步slash commands失敗: {e}')
+        print(f'❌ 同步slash commands失敗: {e}')
+        import traceback
+        traceback.print_exc()
 
 @bot.tree.command(name='bridge', description='開始橋牌遊戲（2人或4人）')
 @app_commands.describe(
